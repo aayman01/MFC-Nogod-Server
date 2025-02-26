@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
+const bcrypt = require("bcrypt");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 require("dotenv").config();
 const app = express();
@@ -25,6 +26,36 @@ async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
+
+    const db = client.db("MFS");
+    const usersCollection = db.collection("users");
+    const transactionsCollection = db.collection("transactions");
+    const adminCollection = db.collection("admin");
+
+    // Register User or Agent
+    app.post("/register", async (req, res) => {
+      const { name, mobile, email, pin, accountType, nid } = req.body;
+      const hashedPin = await bcrypt.hash(pin, 10);
+      const userExists = await usersCollection.findOne({
+        $or: [{ mobile }, { email }, { nid }],
+      });
+
+      if (userExists)
+        return res.status(400).json({ message: "User already exists" });
+
+      const newUser = {
+        name,
+        mobile,
+        email,
+        pin: hashedPin,
+        accountType,
+        nid,
+        balance: accountType === "agent" ? 100000 : 40,
+      };
+      await usersCollection.insertOne(newUser);
+      res.status(201).json({ message: "success" });
+    });
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log(
