@@ -25,7 +25,7 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
 
     const db = client.db("MFS");
     const usersCollection = db.collection("users");
@@ -93,8 +93,8 @@ async function run() {
 
       // Check if user is blocked
       if (user.isBlocked) {
-        return res.status(403).json({ 
-          message: "Your account has been blocked. Please contact support." 
+        return res.status(403).json({
+          message: "Your account has been blocked. Please contact support.",
         });
       }
 
@@ -178,21 +178,23 @@ async function run() {
         // First check if the agent exists and is pending
         const agent = await usersCollection.findOne({
           _id: new ObjectId(id),
-          accountType: "pending"
+          accountType: "pending",
         });
 
         if (!agent) {
-          return res.status(404).json({ message: "Agent not found or already approved" });
+          return res
+            .status(404)
+            .json({ message: "Agent not found or already approved" });
         }
 
         // Update the agent's status and add initial balance
         const result = await usersCollection.updateOne(
           { _id: new ObjectId(id) },
-          { 
-            $set: { 
+          {
+            $set: {
               accountType: "agent",
-              balance: 100000 // Adding 100000 taka initial balance
-            } 
+              balance: 100000, // Adding 100000 taka initial balance
+            },
           }
         );
 
@@ -200,11 +202,14 @@ async function run() {
           return res.status(500).json({ message: "Error updating agent" });
         }
 
-        res.status(200).json({ 
-          message: "Agent approved successfully and initial balance of 100000 taka added" 
+        res.status(200).json({
+          message:
+            "Agent approved successfully and initial balance of 100000 taka added",
         });
       } catch (error) {
-        res.status(500).json({ message: "Error approving agent", error: error.message });
+        res
+          .status(500)
+          .json({ message: "Error approving agent", error: error.message });
       }
     });
 
@@ -222,7 +227,7 @@ async function run() {
           _id: new ObjectId(id),
           accountType: "agent",
         });
-        
+
         if (!agent) {
           return res.status(404).json({ message: "Agent not found" });
         }
@@ -236,18 +241,129 @@ async function run() {
           message: `Agent ${!agent.isBlocked ? "blocked" : "unblocked"}`,
         });
       } catch (error) {
+        res.status(500).json({
+          message: "Error blocking/unblocking agent",
+          error: error.message,
+        });
+      }
+    });
+    app.get("/verify-phone/:phone", async (req, res) => {
+      try {
+        const { phone } = req.params;
+
+        const user = await usersCollection.findOne({ mobile : phone});
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        res.status(200).json({ message: "Phone number is valid" });
+      } catch (error) {
+        res
+          .status(500)
+          .json({ message: "Error verifying phone number", error });
+      }
+    });
+
+    // Send Money Route
+    app.post("/send-money", async (req, res) => {
+      try {
+        const { senderPhone, phone, amount } = req.body;
+
+        // Convert amount to number if it's coming as string
+        const transferAmount = Number(amount);
+
+        if (!senderPhone || !phone || !transferAmount) {
+          return res.status(400).json({ message: "Missing required fields" });
+        }
+
+        if (transferAmount < 50) {
+          return res.status(400).json({ message: "Minimum send amount is 50 Taka" });
+        }
+
+        const sender = await usersCollection.findOne({ mobile: senderPhone });
+        const receiver = await usersCollection.findOne({ mobile: phone });
+
+        if (!sender || !receiver) {
+          return res.status(404).json({ message: "Sender or receiver not found" });
+        }
+
+        // Check if sender is blocked
+        if (sender.isBlocked) {
+          return res.status(403).json({ message: "Your account has been blocked" });
+        }
+
+        // Check if receiver is blocked
+        if (receiver.isBlocked) {
+          return res.status(403).json({ message: "Receiver account has been blocked" });
+        }
+
+        let fee = transferAmount > 100 ? 5 : 0;
+        const totalDeduction = transferAmount + fee;
+
+        if (sender.balance < totalDeduction) {
+          return res.status(400).json({ message: "Insufficient balance" });
+        }
+
+        // Using session for transaction atomicity
+        const session = client.startSession();
+        try {
+          await session.withTransaction(async () => {
+            // Update sender balance
+            await usersCollection.updateOne(
+              { mobile: senderPhone },
+              { $inc: { balance: -totalDeduction } },
+              { session }
+            );
+
+            // Update receiver balance
+            await usersCollection.updateOne(
+              { mobile: phone },
+              { $inc: { balance: transferAmount } },
+              { session }
+            );
+
+            // Update admin balance with the fee
+            if (fee > 0) {
+              await usersCollection.updateOne(
+                { accountType: "admin" },
+                { $inc: { balance: fee } },
+                { session }
+              );
+            }
+
+            // Store transaction record
+            await transactionsCollection.insertOne({
+              senderPhone,
+              receiverPhone: phone,
+              amount: transferAmount,
+              fee,
+              type: "send-money",
+              createdAt: new Date()
+            }, { session });
+          });
+
+          res.status(200).json({ 
+            message: "Transaction successful",
+            transferAmount,
+            fee,
+            totalDeduction
+          });
+        } finally {
+          await session.endSession();
+        }
+      } catch (error) {
         res.status(500).json({ 
-          message: "Error blocking/unblocking agent", 
+          message: "Transaction failed", 
           error: error.message 
         });
       }
     });
 
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
+    // await client.db("admin").command({ ping: 1 });
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!"
+    // );
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
