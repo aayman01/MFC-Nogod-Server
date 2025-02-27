@@ -60,23 +60,21 @@ async function run() {
         pin: hashedPin,
         accountType,
         nid,
-        balance: accountType === "agent" ? 100000 : 40,
+        balance: accountType === "user" ? 40 : 0,
       };
       await usersCollection.insertOne(newUser);
       res.status(201).json({ message: "success" });
     });
 
-
     app.post("/login", async (req, res) => {
-      const { identifier, pin } = req.body; // Single identifier field
-      // console.log(identifier,pin)
+      const { identifier, pin } = req.body;
 
       let user;
-      let isEmail = false; 
+      let isEmail = false;
 
       // Regular expressions to check if it's an email or a mobile number
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/; 
-      const mobileRegex = /^[0-9]{11}$/; 
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      const mobileRegex = /^[0-9]{11}$/;
 
       if (emailRegex.test(identifier)) {
         isEmail = true;
@@ -93,6 +91,13 @@ async function run() {
         return res.status(400).json({ message: "User not found" });
       }
 
+      // Check if user is blocked
+      if (user.isBlocked) {
+        return res.status(403).json({ 
+          message: "Your account has been blocked. Please contact support." 
+        });
+      }
+
       const validPin = await bcrypt.compare(pin, user.pin);
       if (!validPin) {
         return res.status(400).json({ message: "Invalid credentials" });
@@ -102,23 +107,141 @@ async function run() {
         { id: user._id, role: user.accountType },
         process.env.JWT_SECRET
       );
-      res.json({ token, user ,message: "success" });
+      res.json({ token, user, message: "success" });
     });
 
-
-    app.get("/user", authenticateToken, (req, res) => {
-      res.json(req.user); 
+    app.get("/token", authenticateToken, (req, res) => {
+      res.json(req.user);
     });
 
-    app.get("/user/:id",async(req, res) => {
-      // const id = req.params.id;
-      console.log(id)
-      const user = await usersCollection.findOne({ _id: new ObjectId(id) });
-      // console.log(user)
-      res.json(user);
-    })
+    app.get("/user/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
 
+        // Validate if id is a valid ObjectId
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid ID format" });
+        }
 
+        const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        res.json(user);
+      } catch (error) {
+        res
+          .status(500)
+          .json({ message: "Error fetching user", error: error.message });
+      }
+    });
+
+    // Fetch all agents
+    app.get("/agents", async (req, res) => {
+      try {
+        const agents = await usersCollection
+          .find({ accountType: { $in: ["agent", "pending"] } })
+          .toArray();
+        res.status(200).json(agents);
+      } catch (error) {
+        res.status(500).json({ message: "Error fetching agents", error });
+      }
+    });
+
+    // Get a single agent and their transactions
+    app.get("/agents/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        const agent = await usersCollection.findOne({ _id: id });
+        if (!agent) return res.status(404).json({ message: "Agent not found" });
+
+        // Fetch last 100 transactions for the agent
+        const transactions = await transactionsCollection
+          .find({ userId: id })
+          .sort({ createdAt: -1 })
+          .limit(100)
+          .toArray();
+
+        res.status(200).json({ agent, transactions });
+      } catch (error) {
+        res.status(500).json({ message: "Error fetching agent data", error });
+      }
+    });
+
+    // Approve an agent (Change accountType from 'pending' → 'agent')
+    app.patch("/agents/:id/approve", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        // First check if the agent exists and is pending
+        const agent = await usersCollection.findOne({
+          _id: new ObjectId(id),
+          accountType: "pending"
+        });
+
+        if (!agent) {
+          return res.status(404).json({ message: "Agent not found or already approved" });
+        }
+
+        // Update the agent's status and add initial balance
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { 
+            $set: { 
+              accountType: "agent",
+              balance: 100000 // Adding 100000 taka initial balance
+            } 
+          }
+        );
+
+        if (result.modifiedCount === 0) {
+          return res.status(500).json({ message: "Error updating agent" });
+        }
+
+        res.status(200).json({ 
+          message: "Agent approved successfully and initial balance of 100000 taka added" 
+        });
+      } catch (error) {
+        res.status(500).json({ message: "Error approving agent", error: error.message });
+      }
+    });
+
+    // Block/Unblock an agent
+    app.patch("/agents/:id/block", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        // Validate if id is a valid ObjectId
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid ID format" });
+        }
+
+        const agent = await usersCollection.findOne({
+          _id: new ObjectId(id),
+          accountType: "agent",
+        });
+        
+        if (!agent) {
+          return res.status(404).json({ message: "Agent not found" });
+        }
+
+        await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { isBlocked: !agent.isBlocked } }
+        );
+
+        res.status(200).json({
+          message: `Agent ${!agent.isBlocked ? "blocked" : "unblocked"}`,
+        });
+      } catch (error) {
+        res.status(500).json({ 
+          message: "Error blocking/unblocking agent", 
+          error: error.message 
+        });
+      }
+    });
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
